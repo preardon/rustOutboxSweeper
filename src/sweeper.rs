@@ -4,11 +4,25 @@ use aws_sdk_sns::Client as SnsClient;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, Span};
 
-#[instrument(skip_all, fields(messages_found=0, messages_sent=0))]
+// Helper function to mark messages as sent and log the result
+async fn mark_and_log_sent(db_pool: &sqlx::PgPool, topic: &str, messages: &[crate::models::OutboxMessage], messages_found: usize) {
+    let message_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+    match outbox::mark_messages_as_sent(db_pool, message_ids).await {
+        Ok(_) => {
+            info!(%topic, messages_sent = messages_found, "Successfully sent and marked messages.");
+        }
+        Err(e) => {
+            error!(%topic, "Error marking messages: {}. These messages WILL be re-sent.", e);
+        }
+    }
+}
+
+#[instrument(skip_all, fields(topics_needing_dispatch=0))]
 pub async fn sweep_outbox_and_send(
     db_pool: &PgPool,
     sqs_client: &SqsClient,
     sns_client: &SnsClient,
+    batch_size: &i32,
 ) -> Result<(), sqlx::Error> {
     info!("Checking outbox for pending messages...");
 
@@ -19,9 +33,27 @@ pub async fn sweep_outbox_and_send(
         info!("No un-dispatches messages found.");
         return Ok(());
     }
+    Span::current().record("topics_needing_dispatch", topics_needing_dispatch);
 
     for topic in topics {
-        let messages = outbox::get_pending_messages(db_pool, &topic).await?;
+        sweep_channel(db_pool, sqs_client, sns_client, batch_size, &topic).await?;
+    }
+
+    info!("Outbox sweep complete for all topics.");
+
+    Ok(())
+}
+
+#[instrument(skip_all, fields(messages_found=0))]
+pub async fn sweep_channel(
+    db_pool: &PgPool,
+    sqs_client: &SqsClient,
+    sns_client: &SnsClient,
+    batch_size: &i32,
+    channel_name: &str,
+) -> Result<(), sqlx::Error>
+{
+    let messages = outbox::get_pending_messages(db_pool, &channel_name, &batch_size).await?;
 
         let messages_found = messages.len();
         if messages_found == 0 {
@@ -37,42 +69,25 @@ pub async fn sweep_outbox_and_send(
             info!(channel_type, "Channel Selected");
             match messaging::send_messages_to_sns(sns_client, address.to_string(), &messages).await{
                 Ok(_) =>{
-                    let message_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
-                    match outbox::mark_messages_as_sent(db_pool, message_ids).await {
-                        Ok(_) => {
-                            info!(%topic, messages_sent = messages_found, "Successfully sent and marked messages.");
-                        }
-                        Err(e) => {
-                            error!(%topic, "Error marking messages: {}. These messages WILL be re-sent.", e);
-                        }
-                    }
+                    mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
                 }
                 Err(error) =>{
-                    error!(%topic, "Failed to send messages to {}: {:#?}.", channel_type, error);
+                    error!(%channel_name, "Failed to send messages to {}: {:#?}.", channel_type, error);
                 }
             }
         }
         else {
             match messaging::send_messages_to_sqs(sqs_client, channel_address, &messages).await {
                 Ok(_) => {
-                    let message_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
-                    match outbox::mark_messages_as_sent(db_pool, message_ids).await {
-                        Ok(_) => {
-                            info!(%topic, messages_sent = messages_found, "Successfully sent and marked messages.");
-                        }
-                        Err(e) => {
-                            error!(%topic, "Error marking messages: {}. These messages WILL be re-sent.", e);
-                        }
-                    }
+                    mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
+
                 }
                 Err(e) => {
-                    error!(%topic, "Failed to send messages to SQS: {:#?}.", e);
+                    error!(%channel_name, "Failed to send messages to SQS: {:#?}.", e);
                 }
             }
         }
-        Span::current().record("messages_sent", messages_found);
-        info!("Outbox sweep complete for topic {}. Sent {} messages.", topic, messages_found);
-    }
+        info!("Outbox sweep complete for channel {}. Sent {} messages.", channel_name, messages_found);
 
     Ok(())
 }
@@ -151,12 +166,12 @@ mod tests {
             assert!(msg.is_some(), "Test message was not inserted");
 
             // --- ACT ---
-            let result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client).await;
+            let result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client, &10).await;
 
             // --- ASSERT ---
             assert!(result.is_ok(), "Sweeper returned an error: {:?}", result.err());
 
-            let remaining_messages = outbox::get_pending_messages(&pool, "test.topic").await.unwrap();
+            let remaining_messages = outbox::get_pending_messages(&pool, "test.topic", &10).await.unwrap();
 
             assert_eq!(remaining_messages.len(), 0, "Message was not marked as 'sent'");
 
@@ -178,11 +193,11 @@ mod tests {
         let (sqs_client, sns_client) = setup_aws_clients(&config).await;
 
         // 2. Ensure no messages are in the DB
-        let initial_messages = outbox::get_pending_messages(&pool, "test.topic").await.unwrap();
+        let initial_messages = outbox::get_pending_messages(&pool, "test.topic", &10).await.unwrap();
         assert_eq!(initial_messages.len(), 0, "Database was not empty at start");
 
         // --- ACT ---
-        let result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client).await;
+        let result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client, &10).await;
 
         // --- ASSERT ---
 
@@ -190,7 +205,7 @@ mod tests {
         assert!(result.is_ok(), "Sweeper returned an error: {:?}", result.err());
 
         // 2. Assert the database is still empty
-        let final_messages = outbox::get_pending_messages(&pool, "test.topic").await.unwrap();
+        let final_messages = outbox::get_pending_messages(&pool, "test.topic", &10).await.unwrap();
         assert_eq!(final_messages.len(), 0, "Messages appeared after empty sweep");
     }
 
@@ -211,17 +226,17 @@ mod tests {
         let message_id = insert_test_message(&pool, invalid_queue_url).await;
 
         // 3. Check its initial status
-        let initial_messages = outbox::get_pending_messages(&pool, "test.topic").await.unwrap();
+        let initial_messages = outbox::get_pending_messages(&pool, "test.topic", &10).await.unwrap();
         assert_eq!(initial_messages.len(), 1, "Test message was not inserted");
         assert_eq!(initial_messages[0].message_id, message_id);
 
 
         // --- ACT ---
         // Run the sweeper with the INVALID queue URL
-        let _result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client).await;
+        let _result = sweep_outbox_and_send(&pool, &sqs_client, &sns_client, &10).await;
 
         // --- ASSERT ---
-        let final_messages = outbox::get_pending_messages(&pool, "test.topic").await.unwrap();
+        let final_messages = outbox::get_pending_messages(&pool, "test.topic", &10).await.unwrap();
 
         assert_eq!(final_messages.len(), 1, "Message was not rolled back");
         let final_message = final_messages.first().unwrap();

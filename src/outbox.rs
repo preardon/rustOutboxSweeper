@@ -26,6 +26,7 @@ pub async fn get_distinct_pending_topics(pool: &PgPool) -> Result<Vec<String>, s
 pub async fn get_pending_messages(
     db_pool: &PgPool,
     topic: &str,
+    batch_size: &i32,
 ) -> Result<Vec<OutboxMessage>, sqlx::Error> {
     let messages = query_as::<_, OutboxMessage>(
         r#"
@@ -34,11 +35,12 @@ pub async fn get_pending_messages(
         WHERE dispatched is null
             And message_type = $1
         ORDER BY timestamp
-        LIMIT 10
+        LIMIT $2
         FOR UPDATE SKIP LOCKED
         "#,
     )
         .bind(topic)
+        .bind(batch_size)
         .fetch_all(db_pool) // Run the query within the transaction
         .await?;
 

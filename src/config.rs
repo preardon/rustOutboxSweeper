@@ -6,7 +6,7 @@ pub struct Config {
     #[serde(default = "default_sweep_interval")]
     pub sweep_interval_ms: u64,
     pub aws_region: String,
-
+    pub batch_size: i32,
 }
 
 fn default_sweep_interval() -> u64 {
