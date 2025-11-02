@@ -1,0 +1,51 @@
+ # Ignore compiled artifacts
+
+*.rlib
+*.rmeta
+*.so
+*.dylib
+*.a
+*.dll
+*.exe
+*.o
+*.d
+
+# Ignore build directory
+
+/target/
+
+# Ignore local configuration files (these contain secrets!)
+
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+# Ignore general OS files
+
+.DS_Store
+Thumbs.db
+
+# Ignore IDE/editor-specific files
+
+.idea/
+.vscode/
+*.suo
+*.user
+.user.
+*.compile.txt
+*.pdb
+*.replit
+volume/
+
+# Ignore log files
+
+*.log
+
+# Ignore benchmark data
+
+*.bench
+
+# cargo-watch logs
+
+.cargo-watch.log

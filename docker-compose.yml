@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  localstack:
+    container_name: "${LOCALSTACK_DOCKER_NAME:-localstack-main}"
+    image: localstack/localstack
+    ports:
+      # LocalStack Gateway
+      - "127.0.0.1:4566:4566"
+      # External services port range
+      - "127.0.0.1:4510-4559:4510-4559"
+    environment:
+      # You can add configuration variables here
+      - DEBUG=${DEBUG:-0}
+    volumes:
+      # Mounts a volume for persistence
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      # Mounts the docker socket to allow LocalStack to spin up other containers (e.g., for Lambda)
+      - "/var/run/docker.sock:/var/run/docker.sock"
