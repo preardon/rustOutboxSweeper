@@ -13,7 +13,9 @@ use std::time::Duration;
 use actix_web::{App, HttpResponse, HttpServer, Responder, get};
 use tokio::time;
 use tracing::{error, info, Level};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 
 #[get("/health")]
 async fn health_check() -> impl Responder {
@@ -38,18 +40,11 @@ async fn health_check() -> impl Responder {
         info!("Shutdown signal received. Exiting sweeper loop.");
     }
 
-async fn run_sweeper_logic() {
+async fn run_sweeper_logic(config : Config) {
     // Setup logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .init();
-
-    // --- Configuration ---
-    info!("Loading configuration...");
-    let config = Config::load().expect("Failed to load configuration");
-    info!("Configuration loaded.");
-
-    // --- End Configuration ---
 
     // 1. Connect to the Database
     info!("Connecting to database...");
@@ -94,8 +89,33 @@ async fn run_sweeper_logic() {
 /// The main function sets up our application's state and runs the timer.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sweeper_handle = tokio::spawn(async {
-        run_sweeper_logic().await;
+    // --- Configuration ---
+    info!("Loading configuration...");
+    let config = Config::load().expect("Failed to load configuration");
+    info!("Configuration loaded.");
+
+    // --- End Configuration ---
+
+    if let Some(sentry_dsn) = config.sentry_dsn.clone() {
+        let _guard = sentry::init((sentry_dsn, sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: false,
+            ..Default::default()
+        }));
+        let sentry_layer = sentry::integrations::tracing::layer();
+        let fmt_layer = fmt::layer()
+            .with_target(false) // Don't log module paths
+            .pretty();
+        tracing_subscriber::registry()
+            .with(sentry_layer)
+            .with(fmt_layer)
+            .with(EnvFilter::from_default_env())
+            .init();
+        info!("Sentry initialized with DSN.");
+    }
+
+    let sweeper_handle = tokio::spawn(async move {
+        run_sweeper_logic(config).await;
     });
 
     // Spawn the health check server

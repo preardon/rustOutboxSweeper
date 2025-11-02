@@ -2,7 +2,7 @@
 FROM rust:1-alpine AS builder
 WORKDIR /usr/src/app
 # Install build dependencies for Rust (C toolchain)
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base pkgconfig musl-dev openssl-dev
 COPY . .
 RUN cargo build --release
 

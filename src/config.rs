@@ -7,6 +7,7 @@ pub struct Config {
     pub sweep_interval_ms: u64,
     pub aws_region: String,
     pub batch_size: i32,
+    pub sentry_dsn: Option<String>,
 }
 
 fn default_sweep_interval() -> u64 {

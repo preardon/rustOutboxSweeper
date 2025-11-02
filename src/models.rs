@@ -1,6 +1,7 @@
 use chrono::{Utc, DateTime};
 use sqlx::FromRow;
 
+#[allow(dead_code)]
 #[derive(Debug, FromRow)]
 pub struct OutboxMessage {
     pub id: i64,

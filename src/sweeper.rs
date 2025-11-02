@@ -53,41 +53,41 @@ pub async fn sweep_channel(
     channel_name: &str,
 ) -> Result<(), sqlx::Error>
 {
+    Span::current().record("channel_name", channel_name);
     let messages = outbox::get_pending_messages(db_pool, &channel_name, &batch_size).await?;
 
-        let messages_found = messages.len();
-        if messages_found == 0 {
-            info!("No pending messages found.");
-            return Ok(());
-        }
-        info!(messages_found, "Found messages to send.");
-        Span::current().record("messages_found", messages_found);
+    let messages_found = messages.len();
+    if messages_found == 0 {
+        info!("No pending messages found.");
+        return Ok(());
+    }
+    info!(messages_found, "Found messages to send.");
+    Span::current().record("messages_found", messages_found);
 
-        let channel_address = messages[0].channel_address.clone();
+    let channel_address = messages[0].channel_address.clone();
 
-        if let Some((channel_type, address)) = channel_address.split_once("::") {
-            info!(channel_type, "Channel Selected");
-            match messaging::send_messages_to_sns(sns_client, address.to_string(), &messages).await{
-                Ok(_) =>{
-                    mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
-                }
-                Err(error) =>{
-                    error!(%channel_name, "Failed to send messages to {}: {:#?}.", channel_type, error);
-                }
+    if let Some((channel_type, address)) = channel_address.split_once("::") {
+        info!(channel_type, "Channel Selected");
+        match messaging::send_messages_to_sns(sns_client, address.to_string(), &messages).await{
+            Ok(_) =>{
+                mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
+            }
+            Err(e) =>{
+                error!(err = ?e, %channel_name, %channel_type, "Failed to send messages to SNS");
             }
         }
-        else {
-            match messaging::send_messages_to_sqs(sqs_client, channel_address, &messages).await {
-                Ok(_) => {
-                    mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
-
-                }
-                Err(e) => {
-                    error!(%channel_name, "Failed to send messages to SQS: {:#?}.", e);
-                }
+    }
+    else {
+        match messaging::send_messages_to_sqs(sqs_client, channel_address, &messages).await {
+            Ok(_) => {
+                mark_and_log_sent(db_pool, &channel_name, &messages, messages_found).await;
+            }
+            Err(e) => {
+                error!(err = ?e, %channel_name, "Failed to send messages to SQS");
             }
         }
-        info!("Outbox sweep complete for channel {}. Sent {} messages.", channel_name, messages_found);
+    }
+    info!("Outbox sweep complete for channel {}. Sent {} messages.", channel_name, messages_found);
 
     Ok(())
 }
